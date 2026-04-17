@@ -1,18 +1,15 @@
 """
 FusionBrain - Autonomous Personal AI Superassistant
-Backend: FastAPI with Groq AI, Telegram Bot, and Email Monitoring
+Backend: Flask with Groq AI, Telegram Bot, and Email Monitoring
 """
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from flask import Flask, request, jsonify
 import os
 import json
 import sqlite3
 import requests
 from datetime import datetime
 from typing import Optional, Dict, Any
-import asyncio
 from groq import Groq
 import logging
 
@@ -20,17 +17,16 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(title="FusionBrain", version="1.0.0")
+# Initialize Flask app
+app = Flask(__name__)
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS headers
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
 
 # Environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -206,31 +202,35 @@ def log_activity(action: str, details: str = None, user_id: str = "owner"):
 
 # ============ API ENDPOINTS ============
 
-@app.get("/")
-async def root():
+@app.route("/", methods=["GET"])
+def root():
     """Health check endpoint."""
-    return {
+    return jsonify({
         "status": "online",
         "service": "FusionBrain",
         "version": "1.0.0",
         "ai": "Jarvis (Groq llama-3.1-8b-instant)",
         "timestamp": datetime.now().isoformat()
-    }
+    })
 
-@app.get("/health")
-async def health():
+@app.route("/health", methods=["GET"])
+def health():
     """Health check."""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    })
 
-@app.post("/chat")
-async def chat(data: Dict[str, Any]):
+@app.route("/chat", methods=["POST"])
+def chat():
     """Chat with FusionBrain AI."""
     try:
+        data = request.get_json()
         content = data.get("content", "")
         user_id = data.get("user_id", "owner")
         
         if not content:
-            raise HTTPException(status_code=400, detail="Content is required")
+            return jsonify({"error": "Content is required"}), 400
         
         # Get AI response
         ai_response = get_ai_response(content)
@@ -252,18 +252,18 @@ async def chat(data: Dict[str, Any]):
         # Log activity
         log_activity("chat_interaction", f"User: {content[:50]}...", user_id)
         
-        return {
+        return jsonify({
             "status": "success",
             "response": ai_response,
             "timestamp": datetime.now().isoformat()
-        }
+        })
     
     except Exception as e:
         logger.error(f"Chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
-@app.get("/status")
-async def status():
+@app.route("/status", methods=["GET"])
+def status():
     """Get system status and monitored sources."""
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -283,7 +283,7 @@ async def status():
         
         conn.close()
         
-        return {
+        return jsonify({
             "status": "operational",
             "ai": "Jarvis Online",
             "telegram_bot": "Connected",
@@ -295,22 +295,23 @@ async def status():
             ],
             "unread_notifications": len(unread_notifications),
             "timestamp": datetime.now().isoformat()
-        }
+        })
     
     except Exception as e:
         logger.error(f"Status error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
-@app.post("/notify")
-async def notify(data: Dict[str, Any]):
+@app.route("/notify", methods=["POST"])
+def notify():
     """Create notification and send via Telegram."""
     try:
+        data = request.get_json()
         title = data.get("title", "")
         content = data.get("content", "")
         user_id = data.get("user_id", "owner")
         
         if not title or not content:
-            raise HTTPException(status_code=400, detail="Title and content are required")
+            return jsonify({"error": "Title and content are required"}), 400
         
         # Store in database
         conn = sqlite3.connect(DB_PATH)
@@ -329,21 +330,23 @@ async def notify(data: Dict[str, Any]):
         # Log activity
         log_activity("notification_sent", f"Title: {title}", user_id)
         
-        return {
+        return jsonify({
             "status": "success",
             "notification_id": notification_id,
             "telegram_sent": telegram_sent,
             "timestamp": datetime.now().isoformat()
-        }
+        })
     
     except Exception as e:
         logger.error(f"Notify error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
-@app.get("/memories")
-async def get_memories(user_id: str = "owner"):
+@app.route("/memories", methods=["GET"])
+def get_memories():
     """Retrieve AI memories and knowledge base."""
     try:
+        user_id = request.args.get("user_id", "owner")
+        
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
@@ -354,7 +357,7 @@ async def get_memories(user_id: str = "owner"):
         memories = cursor.fetchall()
         conn.close()
         
-        return {
+        return jsonify({
             "status": "success",
             "memories": [
                 {
@@ -366,22 +369,23 @@ async def get_memories(user_id: str = "owner"):
             ],
             "total": len(memories),
             "timestamp": datetime.now().isoformat()
-        }
+        })
     
     except Exception as e:
         logger.error(f"Memories error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
-@app.post("/memories")
-async def create_memory(data: Dict[str, Any]):
+@app.route("/memories", methods=["POST"])
+def create_memory():
     """Create new memory."""
     try:
+        data = request.get_json()
         content = data.get("content", "")
         category = data.get("category", "general")
         user_id = data.get("user_id", "owner")
         
         if not content:
-            raise HTTPException(status_code=400, detail="Content is required")
+            return jsonify({"error": "Content is required"}), 400
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -395,20 +399,21 @@ async def create_memory(data: Dict[str, Any]):
         
         log_activity("memory_created", f"Category: {category}", user_id)
         
-        return {
+        return jsonify({
             "status": "success",
             "memory_id": memory_id,
             "timestamp": datetime.now().isoformat()
-        }
+        })
     
     except Exception as e:
         logger.error(f"Create memory error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
-@app.post("/tasks")
-async def create_task(data: Dict[str, Any]):
+@app.route("/tasks", methods=["POST"])
+def create_task():
     """Create new task."""
     try:
+        data = request.get_json()
         title = data.get("title", "")
         description = data.get("description", "")
         priority = data.get("priority", "medium")
@@ -416,7 +421,7 @@ async def create_task(data: Dict[str, Any]):
         user_id = data.get("user_id", "owner")
         
         if not title:
-            raise HTTPException(status_code=400, detail="Title is required")
+            return jsonify({"error": "Title is required"}), 400
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -433,20 +438,22 @@ async def create_task(data: Dict[str, Any]):
         # Send notification
         send_telegram_notification("New Task Created", f"📋 {title}")
         
-        return {
+        return jsonify({
             "status": "success",
             "task_id": task_id,
             "timestamp": datetime.now().isoformat()
-        }
+        })
     
     except Exception as e:
         logger.error(f"Create task error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
-@app.get("/tasks")
-async def get_tasks(user_id: str = "owner"):
+@app.route("/tasks", methods=["GET"])
+def get_tasks():
     """Get all tasks."""
     try:
+        user_id = request.args.get("user_id", "owner")
+        
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
@@ -457,7 +464,7 @@ async def get_tasks(user_id: str = "owner"):
         tasks = cursor.fetchall()
         conn.close()
         
-        return {
+        return jsonify({
             "status": "success",
             "tasks": [
                 {
@@ -472,17 +479,17 @@ async def get_tasks(user_id: str = "owner"):
             ],
             "total": len(tasks),
             "timestamp": datetime.now().isoformat()
-        }
+        })
     
     except Exception as e:
         logger.error(f"Get tasks error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
-@app.post("/telegram/webhook")
-async def telegram_webhook(request: Request):
+@app.route("/telegram/webhook", methods=["POST"])
+def telegram_webhook():
     """Telegram bot webhook handler."""
     try:
-        data = await request.json()
+        data = request.get_json()
         
         if "message" in data:
             message = data["message"]
@@ -508,16 +515,19 @@ async def telegram_webhook(request: Request):
             # Log activity
             log_activity("telegram_message_received", f"Message: {text[:50]}...")
         
-        return {"status": "ok"}
+        return jsonify({"status": "ok"})
     
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
-        return {"status": "error", "detail": str(e)}
+        return jsonify({"status": "error", "detail": str(e)}), 500
 
-@app.get("/activity-log")
-async def get_activity_log(user_id: str = "owner", limit: int = 50):
+@app.route("/activity-log", methods=["GET"])
+def get_activity_log():
     """Get activity log."""
     try:
+        user_id = request.args.get("user_id", "owner")
+        limit = request.args.get("limit", 50, type=int)
+        
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
@@ -528,7 +538,7 @@ async def get_activity_log(user_id: str = "owner", limit: int = 50):
         activities = cursor.fetchall()
         conn.close()
         
-        return {
+        return jsonify({
             "status": "success",
             "activities": [
                 {
@@ -540,13 +550,12 @@ async def get_activity_log(user_id: str = "owner", limit: int = 50):
             ],
             "total": len(activities),
             "timestamp": datetime.now().isoformat()
-        }
+        })
     
     except Exception as e:
         logger.error(f"Activity log error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)

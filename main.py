@@ -11,8 +11,7 @@ import json
 import sqlite3
 import requests
 from datetime import datetime
-from typing import Optional, List
-from pydantic import BaseModel
+from typing import Optional, Dict, Any
 import asyncio
 from groq import Groq
 import logging
@@ -126,28 +125,6 @@ def init_db():
 # Initialize database on startup
 init_db()
 
-# Pydantic models
-class ChatMessage(BaseModel):
-    content: str
-    user_id: Optional[str] = "owner"
-
-class NotificationRequest(BaseModel):
-    title: str
-    content: str
-    user_id: Optional[str] = "owner"
-
-class TaskCreate(BaseModel):
-    title: str
-    description: Optional[str] = None
-    priority: Optional[str] = "medium"
-    due_date: Optional[str] = None
-    user_id: Optional[str] = "owner"
-
-class MemoryCreate(BaseModel):
-    content: str
-    category: Optional[str] = "general"
-    user_id: Optional[str] = "owner"
-
 # Groq AI client
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -246,20 +223,24 @@ async def health():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 @app.post("/chat")
-async def chat(message: ChatMessage):
+async def chat(data: Dict[str, Any]):
     """Chat with FusionBrain AI."""
     try:
-        user_id = message.user_id or "owner"
+        content = data.get("content", "")
+        user_id = data.get("user_id", "owner")
+        
+        if not content:
+            raise HTTPException(status_code=400, detail="Content is required")
         
         # Get AI response
-        ai_response = get_ai_response(message.content)
+        ai_response = get_ai_response(content)
         
         # Store in database
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
-            (user_id, "user", message.content)
+            (user_id, "user", content)
         )
         cursor.execute(
             "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
@@ -269,7 +250,7 @@ async def chat(message: ChatMessage):
         conn.close()
         
         # Log activity
-        log_activity("chat_interaction", f"User: {message.content[:50]}...", user_id)
+        log_activity("chat_interaction", f"User: {content[:50]}...", user_id)
         
         return {
             "status": "success",
@@ -321,30 +302,36 @@ async def status():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/notify")
-async def notify(notification: NotificationRequest):
+async def notify(data: Dict[str, Any]):
     """Create notification and send via Telegram."""
     try:
-        user_id = notification.user_id or "owner"
+        title = data.get("title", "")
+        content = data.get("content", "")
+        user_id = data.get("user_id", "owner")
+        
+        if not title or not content:
+            raise HTTPException(status_code=400, detail="Title and content are required")
         
         # Store in database
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO notifications (user_id, title, content) VALUES (?, ?, ?)",
-            (user_id, notification.title, notification.content)
+            (user_id, title, content)
         )
         conn.commit()
+        notification_id = cursor.lastrowid
         conn.close()
         
         # Send Telegram notification
-        telegram_sent = send_telegram_notification(notification.title, notification.content)
+        telegram_sent = send_telegram_notification(title, content)
         
         # Log activity
-        log_activity("notification_sent", f"Title: {notification.title}", user_id)
+        log_activity("notification_sent", f"Title: {title}", user_id)
         
         return {
             "status": "success",
-            "notification_id": cursor.lastrowid,
+            "notification_id": notification_id,
             "telegram_sent": telegram_sent,
             "timestamp": datetime.now().isoformat()
         }
@@ -386,22 +373,27 @@ async def get_memories(user_id: str = "owner"):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/memories")
-async def create_memory(memory: MemoryCreate):
+async def create_memory(data: Dict[str, Any]):
     """Create new memory."""
     try:
-        user_id = memory.user_id or "owner"
+        content = data.get("content", "")
+        category = data.get("category", "general")
+        user_id = data.get("user_id", "owner")
+        
+        if not content:
+            raise HTTPException(status_code=400, detail="Content is required")
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO memories (user_id, content, category) VALUES (?, ?, ?)",
-            (user_id, memory.content, memory.category)
+            (user_id, content, category)
         )
         conn.commit()
         memory_id = cursor.lastrowid
         conn.close()
         
-        log_activity("memory_created", f"Category: {memory.category}", user_id)
+        log_activity("memory_created", f"Category: {category}", user_id)
         
         return {
             "status": "success",
@@ -414,25 +406,32 @@ async def create_memory(memory: MemoryCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/tasks")
-async def create_task(task: TaskCreate):
+async def create_task(data: Dict[str, Any]):
     """Create new task."""
     try:
-        user_id = task.user_id or "owner"
+        title = data.get("title", "")
+        description = data.get("description", "")
+        priority = data.get("priority", "medium")
+        due_date = data.get("due_date", "")
+        user_id = data.get("user_id", "owner")
+        
+        if not title:
+            raise HTTPException(status_code=400, detail="Title is required")
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO tasks (user_id, title, description, priority, due_date) VALUES (?, ?, ?, ?, ?)",
-            (user_id, task.title, task.description, task.priority, task.due_date)
+            (user_id, title, description, priority, due_date)
         )
         conn.commit()
         task_id = cursor.lastrowid
         conn.close()
         
-        log_activity("task_created", f"Title: {task.title}", user_id)
+        log_activity("task_created", f"Title: {title}", user_id)
         
         # Send notification
-        send_telegram_notification("New Task Created", f"📋 {task.title}")
+        send_telegram_notification("New Task Created", f"📋 {title}")
         
         return {
             "status": "success",

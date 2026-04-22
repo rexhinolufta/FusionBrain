@@ -1,6 +1,6 @@
 """
 FusionBrain - Autonomous Personal AI Superassistant
-Backend: Flask with Groq AI, Telegram Bot, and Email Monitoring
+Backend: Flask with Groq AI, Telegram Bot, Memory Management
 """
 
 from flask import Flask, request, jsonify
@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from groq import Groq
 import logging
+from memory import MemoryManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +36,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID")
 GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET")
 
+# Initialize Memory Manager
+memory_manager = MemoryManager()
+
 # Database setup
 DB_PATH = "fusionbrain.db"
 
@@ -54,17 +58,6 @@ def init_db():
         )
     """)
     
-    # Memories table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS memories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT DEFAULT 'owner',
-            content TEXT NOT NULL,
-            category TEXT DEFAULT 'general',
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
     # Notifications table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS notifications (
@@ -74,21 +67,6 @@ def init_db():
             content TEXT NOT NULL,
             read BOOLEAN DEFAULT 0,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Tasks table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT DEFAULT 'owner',
-            title TEXT NOT NULL,
-            description TEXT,
-            status TEXT DEFAULT 'pending',
-            priority TEXT DEFAULT 'medium',
-            due_date TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
     
@@ -208,8 +186,9 @@ def root():
     return jsonify({
         "status": "online",
         "service": "FusionBrain",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "ai": "Jarvis (Groq llama-3.1-8b-instant)",
+        "memory": "JSON-based persistent storage",
         "timestamp": datetime.now().isoformat()
     })
 
@@ -273,15 +252,15 @@ def status():
         cursor.execute("SELECT action, details, timestamp FROM activity_log ORDER BY timestamp DESC LIMIT 10")
         recent_activity = cursor.fetchall()
         
-        # Get pending tasks
-        cursor.execute("SELECT id, title, priority, status FROM tasks WHERE status != 'completed' ORDER BY created_at DESC LIMIT 5")
-        pending_tasks = cursor.fetchall()
-        
         # Get unread notifications
         cursor.execute("SELECT id, title, content FROM notifications WHERE read = 0 ORDER BY timestamp DESC LIMIT 5")
         unread_notifications = cursor.fetchall()
         
         conn.close()
+        
+        # Get task stats
+        task_stats = memory_manager.get_task_stats()
+        pending_tasks = memory_manager.get_pending_tasks()
         
         return jsonify({
             "status": "operational",
@@ -290,9 +269,8 @@ def status():
             "recent_activity": [
                 {"action": a[0], "details": a[1], "timestamp": a[2]} for a in recent_activity
             ],
-            "pending_tasks": [
-                {"id": t[0], "title": t[1], "priority": t[2], "status": t[3]} for t in pending_tasks
-            ],
+            "task_stats": task_stats,
+            "pending_tasks_count": len(pending_tasks),
             "unread_notifications": len(unread_notifications),
             "timestamp": datetime.now().isoformat()
         })
@@ -345,29 +323,15 @@ def notify():
 def get_memories():
     """Retrieve AI memories and knowledge base."""
     try:
-        user_id = request.args.get("user_id", "owner")
-        
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            "SELECT id, content, category, timestamp FROM memories WHERE user_id = ? ORDER BY timestamp DESC",
-            (user_id,)
-        )
-        memories = cursor.fetchall()
-        conn.close()
+        facts = memory_manager.get_all_facts()
+        owner_info = memory_manager.get_owner_info()
         
         return jsonify({
             "status": "success",
-            "memories": [
-                {
-                    "id": m[0],
-                    "content": m[1],
-                    "category": m[2],
-                    "timestamp": m[3]
-                } for m in memories
-            ],
-            "total": len(memories),
+            "owner": owner_info["owner"],
+            "facts": facts,
+            "facts_count": len(facts),
+            "preferences": owner_info["preferences"],
             "timestamp": datetime.now().isoformat()
         })
     
@@ -377,31 +341,21 @@ def get_memories():
 
 @app.route("/memories", methods=["POST"])
 def create_memory():
-    """Create new memory."""
+    """Create new memory (fact)."""
     try:
         data = request.get_json()
-        content = data.get("content", "")
-        category = data.get("category", "general")
-        user_id = data.get("user_id", "owner")
+        key = data.get("key", "")
+        value = data.get("value", "")
         
-        if not content:
-            return jsonify({"error": "Content is required"}), 400
+        if not key or not value:
+            return jsonify({"error": "Key and value are required"}), 400
         
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO memories (user_id, content, category) VALUES (?, ?, ?)",
-            (user_id, content, category)
-        )
-        conn.commit()
-        memory_id = cursor.lastrowid
-        conn.close()
-        
-        log_activity("memory_created", f"Category: {category}", user_id)
+        result = memory_manager.remember_fact(key, value)
+        log_activity("memory_created", f"Key: {key}")
         
         return jsonify({
             "status": "success",
-            "memory_id": memory_id,
+            "message": result,
             "timestamp": datetime.now().isoformat()
         })
     
@@ -417,30 +371,20 @@ def create_task():
         title = data.get("title", "")
         description = data.get("description", "")
         priority = data.get("priority", "medium")
-        due_date = data.get("due_date", "")
-        user_id = data.get("user_id", "owner")
+        due_date = data.get("due_date", None)
         
         if not title:
             return jsonify({"error": "Title is required"}), 400
         
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO tasks (user_id, title, description, priority, due_date) VALUES (?, ?, ?, ?, ?)",
-            (user_id, title, description, priority, due_date)
-        )
-        conn.commit()
-        task_id = cursor.lastrowid
-        conn.close()
-        
-        log_activity("task_created", f"Title: {title}", user_id)
+        result = memory_manager.add_task(title, description, priority, due_date)
+        log_activity("task_created", f"Title: {title}")
         
         # Send notification
-        send_telegram_notification("New Task Created", f"📋 {title}")
+        send_telegram_notification("New Task Created", f"📋 {title} (Priority: {priority})")
         
         return jsonify({
             "status": "success",
-            "task_id": task_id,
+            "message": result,
             "timestamp": datetime.now().isoformat()
         })
     
@@ -452,37 +396,76 @@ def create_task():
 def get_tasks():
     """Get all tasks."""
     try:
-        user_id = request.args.get("user_id", "owner")
+        status_filter = request.args.get("status", "all")
+        tasks = memory_manager.load_tasks()
         
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        if status_filter != "all":
+            tasks = [t for t in tasks if t["status"] == status_filter]
         
-        cursor.execute(
-            "SELECT id, title, description, status, priority, due_date, created_at FROM tasks WHERE user_id = ? ORDER BY created_at DESC",
-            (user_id,)
-        )
-        tasks = cursor.fetchall()
-        conn.close()
+        stats = memory_manager.get_task_stats()
         
         return jsonify({
             "status": "success",
-            "tasks": [
-                {
-                    "id": t[0],
-                    "title": t[1],
-                    "description": t[2],
-                    "status": t[3],
-                    "priority": t[4],
-                    "due_date": t[5],
-                    "created_at": t[6]
-                } for t in tasks
-            ],
+            "tasks": tasks,
             "total": len(tasks),
+            "stats": stats,
             "timestamp": datetime.now().isoformat()
         })
     
     except Exception as e:
         logger.error(f"Get tasks error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/tasks/<int:task_id>/complete", methods=["POST"])
+def complete_task(task_id):
+    """Mark task as completed."""
+    try:
+        result = memory_manager.complete_task(task_id)
+        log_activity("task_completed", f"Task ID: {task_id}")
+        
+        send_telegram_notification("Task Completed", f"✓ Task {task_id} has been marked as completed!")
+        
+        return jsonify({
+            "status": "success",
+            "message": result,
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    except Exception as e:
+        logger.error(f"Complete task error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/tasks/<int:task_id>", methods=["DELETE"])
+def delete_task(task_id):
+    """Delete a task."""
+    try:
+        result = memory_manager.delete_task(task_id)
+        log_activity("task_deleted", f"Task ID: {task_id}")
+        
+        return jsonify({
+            "status": "success",
+            "message": result,
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    except Exception as e:
+        logger.error(f"Delete task error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/briefing", methods=["GET"])
+def daily_briefing():
+    """Get daily briefing."""
+    try:
+        briefing = memory_manager.daily_briefing()
+        
+        return jsonify({
+            "status": "success",
+            "briefing": briefing,
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    except Exception as e:
+        logger.error(f"Briefing error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/telegram/webhook", methods=["POST"])
@@ -502,9 +485,14 @@ def telegram_webhook():
                 if text == "/start":
                     response = "👋 Welcome to FusionBrain! I'm Jarvis, your autonomous AI superassistant. How can I help you today?"
                 elif text == "/status":
-                    response = "🟢 FusionBrain is operational. All systems running smoothly."
+                    stats = memory_manager.get_task_stats()
+                    response = f"🟢 FusionBrain is operational.\n\n📊 Tasks: {stats['total']} total, {stats['completed']} completed, {stats['pending']} pending"
+                elif text == "/briefing":
+                    response = memory_manager.daily_briefing()
+                elif text == "/tasks":
+                    response = memory_manager.list_tasks()
                 else:
-                    response = "Unknown command. Try /start or /status"
+                    response = "Unknown command. Try /start, /status, /briefing, or /tasks"
             else:
                 # Regular chat
                 response = get_ai_response(text)
